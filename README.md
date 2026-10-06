@@ -12,12 +12,12 @@
 <p align="center">
   <img src="https://img.shields.io/badge/Java-21-ED8B00?logo=openjdk&logoColor=white" alt="Java 21">
   <img src="https://img.shields.io/badge/Electron-35-47848F?logo=electron&logoColor=white" alt="Electron">
-  <img src="https://img.shields.io/github/v/release/Puteitous/HippoBuddy?logo=github" alt="Release">
-  <img src="https://img.shields.io/github/stars/Puteitous/HippoBuddy?style=flat&logo=github" alt="Stars">
+  <img src="https://img.shields.io/github/v/release/jiangchuanso/HippoBuddy?logo=github" alt="Release">
+  <img src="https://img.shields.io/github/stars/jiangchuanso/HippoBuddy?style=flat&logo=github" alt="Stars">
   <img src="https://img.shields.io/badge/license-Apache%202.0-555555" alt="License">
   <img src="https://img.shields.io/badge/platform-Desktop%20%7C%20Web-555555" alt="Platform">
   <img src="https://img.shields.io/badge/docs-online-5273B7?logo=docusaurus&logoColor=white" alt="Docs">
-  <img src="https://img.shields.io/github/last-commit/Puteitous/HippoBuddy" alt="Last Commit">
+  <img src="https://img.shields.io/github/last-commit/jiangchuanso/HippoBuddy" alt="Last Commit">
 </p>
 
 <p align="center">
@@ -28,12 +28,17 @@
 
 ## 下载安装
 
-| 平台 | 下载 |
+[![下载最新版](https://img.shields.io/github/v/release/jiangchuanso/HippoBuddy?logo=github&label=%E4%B8%8B%E8%BD%BD%E6%9C%80%E6%96%B0%E7%89%88&style=for-the-badge)](https://github.com/jiangchuanso/HippoBuddy/releases/latest)
+
+点击上方徽章前往 **[Releases（最新版）](https://github.com/jiangchuanso/HippoBuddy/releases/latest)** 下载对应平台产物：
+
+| 平台 | 产物 |
 |---|---|
-| Windows | [HippoBuddy Setup](https://github.com/Puteitous/HippoBuddy/releases/latest) |
-| macOS (Intel) | [HippoBuddy.dmg](https://github.com/Puteitous/HippoBuddy/releases/latest) |
-| macOS (Apple Silicon) | [HippoBuddy-arm64.dmg](https://github.com/Puteitous/HippoBuddy/releases/latest) |
-| Linux (AppImage) | [HippoBuddy.AppImage](https://github.com/Puteitous/HippoBuddy/releases/latest) |
+| Windows | HippoBuddy-win-x64.exe |
+| macOS (Intel) | HippoBuddy-x64.dmg（自动更新用 HippoBuddy-x64.zip） |
+| macOS (Apple Silicon) | HippoBuddy-arm64.dmg（自动更新用 HippoBuddy-arm64.zip） |
+| Linux (AppImage) | HippoBuddy-linux-x64.AppImage / HippoBuddy-linux-arm64.AppImage |
+| Linux (deb) | hippobuddy_amd64.deb / hippobuddy_arm64.deb |
 
 > 📖 官网（含技术文档）：[https://www.hippobuddy.cn/](https://www.hippobuddy.cn/)
 >
@@ -123,7 +128,7 @@ HippoBuddy 正在积极迭代中，核心能力（MCP、子代理、记忆、Off
 
 ### 方式一：桌面端（推荐）
 
-下载[安装包](https://github.com/Puteitous/HippoBuddy/releases/latest) -> 安装 -> 启动 -> 开始使用
+下载[安装包](https://github.com/jiangchuanso/HippoBuddy/releases/latest) -> 安装 -> 启动 -> 开始使用
 
 ### 方式二：源码启动
 

@@ -12,11 +12,11 @@
 <p align="center">
   <img src="https://img.shields.io/badge/Java-21-ED8B00?logo=openjdk&logoColor=white" alt="Java 21">
   <img src="https://img.shields.io/badge/Electron-35-47848F?logo=electron&logoColor=white" alt="Electron">
-  <img src="https://img.shields.io/github/v/release/Puteitous/HippoBuddy?logo=github" alt="Release">
-  <img src="https://img.shields.io/github/stars/Puteitous/HippoBuddy?style=flat&logo=github" alt="Stars">
+  <img src="https://img.shields.io/github/v/release/jiangchuanso/HippoBuddy?logo=github" alt="Release">
+  <img src="https://img.shields.io/github/stars/jiangchuanso/HippoBuddy?style=flat&logo=github" alt="Stars">
   <img src="https://img.shields.io/badge/license-Apache%202.0-555555" alt="License">
   <img src="https://img.shields.io/badge/platform-Desktop%20%7C%20Web-555555" alt="Platform">
-  <img src="https://img.shields.io/github/last-commit/Puteitous/HippoBuddy" alt="Last Commit">
+  <img src="https://img.shields.io/github/last-commit/jiangchuanso/HippoBuddy" alt="Last Commit">
 </p>
 
 <p align="center">
@@ -27,12 +27,17 @@
 
 ## Download
 
-| Platform | Download |
+[![Download latest](https://img.shields.io/github/v/release/jiangchuanso/HippoBuddy?logo=github&label=Download%20latest&style=for-the-badge)](https://github.com/jiangchuanso/HippoBuddy/releases/latest)
+
+Click the badge above, or open **[Releases (latest)](https://github.com/jiangchuanso/HippoBuddy/releases/latest)**, and download the artifact for your platform:
+
+| Platform | Artifact |
 |---|---|
-| Windows | [HippoBuddy Setup](https://github.com/Puteitous/HippoBuddy/releases/latest) |
-| macOS (Intel) | [HippoBuddy.dmg](https://github.com/Puteitous/HippoBuddy/releases/latest) |
-| macOS (Apple Silicon) | [HippoBuddy-arm64.dmg](https://github.com/Puteitous/HippoBuddy/releases/latest) |
-| Linux (AppImage) | [HippoBuddy.AppImage](https://github.com/Puteitous/HippoBuddy/releases/latest) |
+| Windows | HippoBuddy-win-x64.exe |
+| macOS (Intel) | HippoBuddy-x64.dmg (updater uses HippoBuddy-x64.zip) |
+| macOS (Apple Silicon) | HippoBuddy-arm64.dmg (updater uses HippoBuddy-arm64.zip) |
+| Linux (AppImage) | HippoBuddy-linux-x64.AppImage / HippoBuddy-linux-arm64.AppImage |
+| Linux (deb) | hippobuddy_amd64.deb / hippobuddy_arm64.deb |
 
 > 📖 Online documentation: [https://www.hippobuddy.cn/](https://www.hippobuddy.cn/)
 >
@@ -119,7 +124,7 @@ A 6-minute quick look at HippoBuddy:
 
 ### Option 1: Desktop (Recommended)
 
-Download [installer](https://github.com/Puteitous/HippoBuddy/releases/latest) -> Install -> Launch -> Start using
+Download [installer](https://github.com/jiangchuanso/HippoBuddy/releases/latest) -> Install -> Launch -> Start using
 
 ### Option 2: From Source
 

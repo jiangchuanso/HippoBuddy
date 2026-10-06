@@ -2,14 +2,17 @@
 
 ## 方式一：桌面端（推荐）
 
-下载[安装包](https://github.com/Puteitous/HippoBuddy/releases/latest) → 安装 → 启动 → 开始使用
+[![下载最新版](https://img.shields.io/github/v/release/jiangchuanso/HippoBuddy?logo=github&label=%E4%B8%8B%E8%BD%BD%E6%9C%80%E6%96%B0%E7%89%88&style=for-the-badge)](https://github.com/jiangchuanso/HippoBuddy/releases/latest)
 
-| 平台 | 下载 |
+点击上方徽章前往 **[Releases（最新版）](https://github.com/jiangchuanso/HippoBuddy/releases/latest)** 下载安装包 → 安装 → 启动 → 开始使用。
+
+| 平台 | 产物 |
 |---|---|
-| Windows | [HippoBuddy Setup](https://github.com/Puteitous/HippoBuddy/releases/latest) |
-| macOS (Intel) | [HippoBuddy.dmg](https://github.com/Puteitous/HippoBuddy/releases/latest) |
-| macOS (Apple Silicon) | [HippoBuddy-arm64.dmg](https://github.com/Puteitous/HippoBuddy/releases/latest) |
-| Linux (AppImage) | [HippoBuddy.AppImage](https://github.com/Puteitous/HippoBuddy/releases/latest) |
+| Windows | HippoBuddy-win-x64.exe |
+| macOS (Intel) | HippoBuddy-x64.dmg（自动更新用 HippoBuddy-x64.zip） |
+| macOS (Apple Silicon) | HippoBuddy-arm64.dmg（自动更新用 HippoBuddy-arm64.zip） |
+| Linux (AppImage) | HippoBuddy-linux-x64.AppImage / HippoBuddy-linux-arm64.AppImage |
+| Linux (deb) | hippobuddy_amd64.deb / hippobuddy_arm64.deb |
 
 ## 方式二：源码启动
 
