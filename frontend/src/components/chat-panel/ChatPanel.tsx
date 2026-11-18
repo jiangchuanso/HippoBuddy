@@ -31,6 +31,7 @@ import {
 
 import { MessageBubble, WebSearchStreamingRow } from './MessageBubble';
 import { HistoryRenderer } from './HistoryRenderer';
+import type { HistoryRendererHandle } from './HistoryRenderer';
 import { ProcessSection } from './ProcessSection';
 import { ToolCardDispatcher } from '../tool-renderers/ToolCardDispatcher';
 import { ToolTimeline } from '../tool-renderers/ToolTimeline';
@@ -416,8 +417,18 @@ export function ChatPanel() {
   // 消息容器 DOM 实例(ChatNav 顶层常驻后,以 state 传递才能在其 effect 中触发
   // 重新绑定滚动监听;ref 对象本身变化不会触发子组件 effect)
   const [messagesContainerEl, setMessagesContainerEl] = useState<HTMLDivElement | null>(null);
+  // 历史窗口化:恢复深层滚动位置、ChatNav 跳转老消息时需要展开更早回合
+  const historyRef = useRef<HistoryRendererHandle | null>(null);
   // 用户是否手动上滚(暂停自动滚动)
   const stickToBottomRef = useRef(true);
+  /** 各会话的滚动位置(切走时保存,切回时恢复;stickBottom=true 表示原本贴底) */
+  const scrollMemoryRef = useRef<Record<string, { top: number; stickBottom: boolean }>>({});
+  /** 上一会话 id(切换时保存离开会话的滚动位置) */
+  const prevSessionIdRef = useRef<string | null>(currentSessionId);
+  /** 当前滚动容器的实时 scrollTop(滚动事件持续更新,切换时不必再读 DOM) */
+  const lastScrollTopRef = useRef(0);
+  /** 已恢复滚动位置的会话(每会话只恢复一次,避免流式追加反复覆盖用户滚动) */
+  const restoredSessionRef = useRef<string | null>(null);
 
   const scrollToBottom = useCallback((behavior: 'smooth' | 'auto' = 'smooth') => {
     messagesEndRef.current?.scrollIntoView({ behavior, block: 'end' });
@@ -439,13 +450,66 @@ export function ChatPanel() {
     scrollToBottom('auto');
   }, [pendingConfirmRecords.length, messages.length, stream, isReasoning, scrollToBottom]);
 
-  // 切换会话时,重置 stickToBottom,并滚到底
+  // 切换会话:保存离开会话的滚动位置,并决定目标会话的初始滚动行为。
+  // 有记忆且原本不贴底 → 等历史加载完成后恢复位置(见下方恢复 effect);
+  // 无记忆或原本贴底 → 滚到底部(与原行为一致)。
   useEffect(() => {
-    stickToBottomRef.current = true;
-    setShowScrollHint(false);
-    // 等下一帧渲染完历史消息再滚
-    requestAnimationFrame(() => scrollToBottom('auto'));
+    const prev = prevSessionIdRef.current;
+    if (prev && prev !== currentSessionId) {
+      scrollMemoryRef.current[prev] = {
+        top: lastScrollTopRef.current,
+        stickBottom: stickToBottomRef.current,
+      };
+    }
+    prevSessionIdRef.current = currentSessionId;
+    restoredSessionRef.current = null;
+
+    const mem = currentSessionId ? scrollMemoryRef.current[currentSessionId] : undefined;
+    stickToBottomRef.current = !mem || mem.stickBottom;
+    setShowScrollHint(!!mem && !mem.stickBottom);
+
+    const el = messagesContainerRef.current;
+    lastScrollTopRef.current = el ? el.scrollTop : 0;
+
+    if (!mem || mem.stickBottom) {
+      // 等下一帧渲染完历史消息再滚
+      requestAnimationFrame(() => scrollToBottom('auto'));
+    }
   }, [currentSessionId, scrollToBottom]);
+
+  // 历史消息异步加载完成(或缓存首次渲染)后,恢复切走前记录的滚动位置。
+  // 每会话只恢复一次:后续流式追加不再改动位置,避免覆盖用户滚动。
+  useEffect(() => {
+    if (!currentSessionId) return;
+    const mem = scrollMemoryRef.current[currentSessionId];
+    if (!mem || mem.stickBottom) return;
+    if (restoredSessionRef.current === currentSessionId) return;
+
+    const applyRestore = (el: HTMLDivElement) => {
+      el.scrollTop = mem.top;
+      restoredSessionRef.current = currentSessionId;
+      const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+      stickToBottomRef.current = distanceFromBottom < 80;
+      setShowScrollHint(!stickToBottomRef.current);
+    };
+
+    const el = messagesContainerRef.current;
+    if (!el) return;
+    if (el.scrollHeight - el.clientHeight < mem.top) {
+      // 高度不足有两种可能:历史仍在加载,或更早回合被窗口化折叠。
+      // 先展开全部历史,等下一帧渲染完成后再恢复位置。
+      historyRef.current?.revealAll();
+      const raf = requestAnimationFrame(() => {
+        const next = messagesContainerRef.current;
+        if (!next || restoredSessionRef.current === currentSessionId) return;
+        if (next.scrollHeight - next.clientHeight < mem.top) return;
+        applyRestore(next);
+      });
+      return () => cancelAnimationFrame(raf);
+    }
+
+    applyRestore(el);
+  }, [currentSessionId, messages.length, stream.length]);
 
   // 切换会话:恢复该会话的输入草稿,清空图片,并聚焦输入框
   useEffect(() => {
@@ -475,6 +539,7 @@ export function ChatPanel() {
   const handleScroll = useCallback(() => {
     const el = messagesContainerRef.current;
     if (!el) return;
+    lastScrollTopRef.current = el.scrollTop;
     const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
     stickToBottomRef.current = distanceFromBottom < 80;
     setShowScrollHint(distanceFromBottom >= 100);
@@ -806,7 +871,10 @@ export function ChatPanel() {
       {/* 会话内用户消息导航(右侧浮动窄条)。
           对齐旧版:chatNavStrip 为静态 DOM 元素,始终存在(空态由 CSS data-empty 隐藏),
           故放在 .chat-panel 顶层、条件分支之外,不随会话/消息有无而卸载。 */}
-      <ChatNav container={messagesContainerEl} />
+      <ChatNav
+        container={messagesContainerEl}
+        onRevealMessage={(messageId) => historyRef.current?.revealMessage(messageId)}
+      />
 
       {/* 空会话:欢迎屏 Hero(对齐旧版 .empty-state)
           显示条件对齐旧版 createNewSession:除了无选中会话外,
@@ -828,6 +896,7 @@ export function ChatPanel() {
             {/* 实时流式 rows 作为 tail 并入同一 history-list 容器:与固化后消息
                 同 key 复用 DOM,避免卸载重挂导致进入动画重放 */}
             <HistoryRenderer
+              ref={historyRef}
               onRetry={handleRetry}
               onFork={handleFork}
               onSendQuestion={handleSendQuestion}

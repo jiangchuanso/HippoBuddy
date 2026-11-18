@@ -2,15 +2,16 @@
  * Sidebar - 左侧会话列表
  *
  * 对齐旧版 static/js/session-manager.js 的展示与交互:
- *  - 顶部圆角胶囊工具栏:折叠面板 + 新建会话
- *  - 36px header:图标 + "会话"标题 + 分组切换按钮 + 会话计数
+ *  - 36px header:"会话历史"标题 + 搜索 + 分组下拉(图标)
+ *  - 搜索:标题 / 项目名即时过滤,平铺展示并高亮命中片段
  *  - 会话列表四态(加载中/错误/空/列表),点击切换 currentSessionId
  *  - 高亮当前会话(灰底,对齐旧版 .session-item.active)
  *  - 运行中会话显示脉冲圆点
  *  - hover 显示操作按钮:✏ 重命名(内联输入框)、× 删除(内联二次确认)
  *  - 宽度由 --session-panel-width 控制,配合 SidebarResizer 拖拽调宽
  *  - 折叠状态存 appStore.sidebarCollapsed(localStorage 持久化),
- *    折叠后由 TopBar 的逃生按钮展开
+ *    由 ActivityBar 的会话/文件视图按钮展开
+ *  - 会话/文件视图由 appStore.sidebarView 驱动(ActivityBar 切换)
  *
  * 2026-08-19:对齐旧版 session-manager.js 的列表核心能力:
  *  - Project/Time 分组切换(持久化 key 与旧版一致:hippo-session-group-mode)
@@ -26,6 +27,7 @@
  *    置顶状态持久化到后端 session.json 的 pinned 字段
  */
 import { useEffect, useMemo, useRef, useState } from 'react';
+import type { ReactNode } from 'react';
 import { sessionApi, workspaceApi } from '@/api/client';
 import { ApiError } from '@/api/error';
 import { useAppStore } from '@/stores/appStore';
@@ -47,30 +49,26 @@ const BATCH_SIZE = 20;
 const GROUP_MODE_KEY = 'hippo-session-group-mode';
 /** 折叠项目持久化 key(与旧版一致) */
 const COLLAPSED_PROJECTS_KEY = 'hippo-collapsed-projects';
-const PINNED_COLLAPSED_KEY = 'hippo-pinned-collapsed';
 /** 无工作区路径的会话归入的"其他"分组 key */
 const OTHER_PROJECT_KEY = '__other__';
 
-/** 侧栏视图切换持久化 key(会话列表 / 文件树,对齐旧版 view-capsule) */
-const SIDEBAR_VIEW_KEY = 'hippo-sidebar-view';
-
 type GroupMode = 'project' | 'time';
-type SidebarView = 'sessions' | 'files';
 
-function readSidebarView(): SidebarView {
-  try {
-    return localStorage.getItem(SIDEBAR_VIEW_KEY) === 'files' ? 'files' : 'sessions';
-  } catch {
-    return 'sessions';
-  }
-}
-
-/** 渲染行:置顶区头 / 项目分组头 / 时间分类头 / 会话项 */
+/** 渲染行:置顶分隔线(仅时间分组)/ 项目分组头 / 会话项 */
 type Row =
-  | { type: 'pinned-header' }
+  | { type: 'pinned-divider' }
   | { type: 'project-header'; projectKey: string; name: string; fullPath: string; collapsed: boolean }
-  | { type: 'category'; category: string }
-  | { type: 'session'; session: Session; name: string };
+  | { type: 'session'; session: Session; name: string; projectLabel?: string };
+
+/** 搜索结果上限(避免极端情况一次性渲染过多行) */
+const SEARCH_RESULT_LIMIT = 200;
+
+/** 项目显示名(路径最后一段;未关联工作区时用「其他」) */
+function projectLabelOf(s: Session, otherLabel: string): string {
+  if (!s.projectPath) return otherLabel;
+  const normalized = s.projectPath.replace(/\\/g, '/');
+  return normalized.split('/').filter(Boolean).pop() || normalized;
+}
 
 /** 会话排序/分组用的时间戳(lastActivityAt 优先,回退 createdAt;对齐旧版) */
 function sessionTime(s: Session): number {
@@ -112,65 +110,8 @@ function persistCollapsedProjects(projects: Set<string>): void {
   }
 }
 
-function readPinnedCollapsed(): boolean {
-  try {
-    return localStorage.getItem(PINNED_COLLAPSED_KEY) === '1';
-  } catch {
-    return false;
-  }
-}
-
-function persistPinnedCollapsed(collapsed: boolean): void {
-  try {
-    localStorage.setItem(PINNED_COLLAPSED_KEY, collapsed ? '1' : '0');
-  } catch {
-    /* localStorage 不可用时静默降级 */
-  }
-}
-
-/** 按时间分组:今天/昨天/7天内/30天内/更早(北京时区;对齐旧版 groupSessionsByTime) */
-function groupSessionsByTime(sessions: Session[]): Array<[string, Session[]]> {
-  const now = Date.now();
-  const BEIJING_OFFSET = 8 * 3600 * 1000;
-  const dayIndex = (ts: number) => Math.floor((ts + BEIJING_OFFSET) / 86400000);
-  const today = dayIndex(now);
-
-  const buckets: Record<string, Session[]> = {
-    '今天': [],
-    '昨天': [],
-    '7天内': [],
-    '30天内': [],
-    '更早': [],
-  };
-
-  for (const s of sessions) {
-    const ts = parseInt(s.lastActivityAt || s.createdAt, 10);
-    if (isNaN(ts)) {
-      buckets['更早'].push(s);
-      continue;
-    }
-    const daysAgo = today - dayIndex(ts);
-    if (daysAgo === 0) buckets['今天'].push(s);
-    else if (daysAgo === 1) buckets['昨天'].push(s);
-    else if (daysAgo <= 7) buckets['7天内'].push(s);
-    else if (daysAgo <= 30) buckets['30天内'].push(s);
-    else buckets['更早'].push(s);
-  }
-
-  return Object.entries(buckets).filter(([, arr]) => arr.length > 0);
-}
-
-/** 时间分类(内部中文常量,兼作分组 key 与 React key)→ 对应 i18n key,展示时 t() 输出 */
-const CATEGORY_KEYS: Record<string, string> = {
-  '今天': 'session.today',
-  '昨天': 'session.yesterday',
-  '7天内': 'session.days7',
-  '30天内': 'session.days30',
-  '更早': 'session.earlier',
-};
-
 export function Sidebar() {
-  const { t, lang } = useI18n();
+  const { t } = useI18n();
   const sessions = useAppStore((s) => s.sessions);
   const currentSessionId = useAppStore((s) => s.currentSessionId);
   const isLoading = useAppStore((s) => s.isLoadingSessions);
@@ -178,7 +119,9 @@ export function Sidebar() {
   const setCurrentSession = useAppStore((s) => s.setCurrentSession);
   const createNewSession = useAppStore((s) => s.createNewSession);
   const sidebarCollapsed = useAppStore((s) => s.sidebarCollapsed);
-  const setSidebarCollapsed = useAppStore((s) => s.setSidebarCollapsed);
+  // 侧栏视图由活动栏（ActivityBar）切换,状态存 store 并持久化
+  const sidebarView = useAppStore((s) => s.sidebarView);
+  const setSidebarView = useAppStore((s) => s.setSidebarView);
   const workspacePath = useAppStore((s) => s.workspacePath);
   const setWorkspacePath = useAppStore((s) => s.setWorkspacePath);
   const sessionDisplayNames = useAppStore((s) => s.sessionDisplayNames);
@@ -186,8 +129,8 @@ export function Sidebar() {
   const previewOpenFile = usePreviewStore((s) => s.openFile);
   const previewActivePath = usePreviewStore((s) => s.activePath);
 
-  // 侧栏视图(会话列表 / 文件树)持久化切换
-  const [sidebarView, setSidebarViewState] = useState<SidebarView>(readSidebarView);
+  // 侧栏视图(会话列表 / 文件树)由 store 驱动,见上方 sidebarView
+
   // 文件树刷新令牌(回滚完成后自增,对齐旧版"回滚 → 工作区联动刷新")
   const [fileTreeToken, setFileTreeToken] = useState(0);
 
@@ -265,25 +208,22 @@ export function Sidebar() {
     const unsubscribe = on<string>('workspace:reveal-dir', (dir) => {
       if (!dir) return;
       setRevealDir(dir);
-      if (sidebarView !== 'files') switchSidebarView('files');
+      if (sidebarView !== 'files') setSidebarView('files');
     });
     return unsubscribe;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sidebarView]);
 
-  const switchSidebarView = (v: SidebarView) => {
-    setSidebarViewState(v);
-    try {
-      localStorage.setItem(SIDEBAR_VIEW_KEY, v);
-    } catch {
-      /* 忽略 */
-    }
-  };
-
   // 分组模式 / 折叠项目(初始化读取 localStorage,与旧版 key 一致)
   const [groupMode, setGroupMode] = useState<GroupMode>(readGroupMode);
   const [collapsedProjects, setCollapsedProjects] = useState<Set<string>>(readCollapsedProjects);
-  const [pinnedCollapsed, setPinnedCollapsed] = useState<boolean>(readPinnedCollapsed);
+  // 分组方式下拉菜单
+  const [groupMenuOpen, setGroupMenuOpen] = useState(false);
+  const groupMenuRef = useRef<HTMLDivElement | null>(null);
+  // 搜索(标题 / 项目名过滤,非持久化)
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
+  const searchInputRef = useRef<HTMLInputElement | null>(null);
   // 无限滚动:已渲染行数
   const [renderedCount, setRenderedCount] = useState(BATCH_SIZE);
   const bodyRef = useRef<HTMLDivElement | null>(null);
@@ -297,6 +237,36 @@ export function Sidebar() {
   const prevGroupModeRef = useRef(groupMode);
   const prevCollapsedProjectsRef = useRef(collapsedProjects);
 
+  // 打开搜索时自动聚焦输入框
+  useEffect(() => {
+    if (searchOpen) searchInputRef.current?.focus();
+  }, [searchOpen]);
+
+  // 切到文件视图时收起搜索(避免回到会话视图时仍停留在搜索态)
+  useEffect(() => {
+    if (sidebarView !== 'files') return;
+    setSearchOpen(false);
+    setSearchQuery('');
+  }, [sidebarView]);
+
+  // 分组下拉:点击外部 / Esc 关闭
+  useEffect(() => {
+    if (!groupMenuOpen) return;
+    const onPointerDown = (e: MouseEvent) => {
+      if (groupMenuRef.current?.contains(e.target as Node)) return;
+      setGroupMenuOpen(false);
+    };
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setGroupMenuOpen(false);
+    };
+    document.addEventListener('pointerdown', onPointerDown, true);
+    window.addEventListener('keydown', onKeyDown);
+    return () => {
+      document.removeEventListener('pointerdown', onPointerDown, true);
+      window.removeEventListener('keydown', onKeyDown);
+    };
+  }, [groupMenuOpen]);
+
   /** 对齐旧版 createNewSession:生成 web-* 会话 id 并把 hero 待定草稿带入新会话;
    *  首次发送消息时才真正持久化;useSessionMessages 会自动 reset chatStore。 */
   const handleNewSession = () => {
@@ -309,17 +279,21 @@ export function Sidebar() {
     void openProjectWorkspace(path);
   };
 
-  /** 切换 Project/Time 分组(持久化,key 与旧版一致) */
-  const toggleGroupMode = () => {
-    setGroupMode((m) => {
-      const next = m === 'project' ? 'time' : 'project';
-      try {
-        localStorage.setItem(GROUP_MODE_KEY, next);
-      } catch {
-        /* 忽略 */
-      }
-      return next;
-    });
+  /** 退出搜索并恢复普通列表 */
+  const closeSearch = () => {
+    setSearchOpen(false);
+    setSearchQuery('');
+  };
+
+  /** 设置分组方式(持久化,key 与旧版一致) */
+  const changeGroupMode = (mode: GroupMode) => {
+    setGroupMode(mode);
+    try {
+      localStorage.setItem(GROUP_MODE_KEY, mode);
+    } catch {
+      /* 忽略 */
+    }
+    setGroupMenuOpen(false);
   };
 
   /** 折叠/展开项目(持久化,key 与旧版一致) */
@@ -329,15 +303,6 @@ export function Sidebar() {
       if (next.has(projectKey)) next.delete(projectKey);
       else next.add(projectKey);
       persistCollapsedProjects(next);
-      return next;
-    });
-  };
-
-  /** 折叠/展开置顶区(持久化,与折叠项目同一套交互) */
-  const togglePinnedCollapsed = () => {
-    setPinnedCollapsed((prev) => {
-      const next = !prev;
-      persistPinnedCollapsed(next);
       return next;
     });
   };
@@ -356,12 +321,34 @@ export function Sidebar() {
   };
 
   /**
-   * 计算渲染行:排序 → 分组(project/time) → 注入虚拟会话。
+   * 计算渲染行:project 模式置顶会话并入所属项目并排在项目最前;
+   * time 模式无项目概念,置顶会话单独置顶并以分隔线区隔。
+   * 搜索态:标题 / 项目名命中的会话平铺展示(不分组、不置顶)。
    * 对齐旧版 renderSessionList / _computeRows / _injectVirtualSession。
    */
   const rows = useMemo<Row[]>(() => {
-    // 置顶会话分离到独立分区(置顶区);普通会话参与 project/time 分组。
-    // 置顶会话从原分组移除,仅在置顶区出现一次(取消置顶后自动回到所属分组)。
+    const query = searchQuery.trim().toLowerCase();
+
+    // 搜索态:强制平铺,按最近活跃降序;结果上限 SEARCH_RESULT_LIMIT
+    if (query) {
+      const otherLabel = t('session.other');
+      return sessions
+        .filter((s) => {
+          const name = sessionDisplayName(s, sessionDisplayNames).toLowerCase();
+          const project = s.projectPath ? s.projectPath.replace(/\\/g, '/').toLowerCase() : '';
+          const label = projectLabelOf(s, otherLabel).toLowerCase();
+          return name.includes(query) || project.includes(query) || label.includes(query);
+        })
+        .sort((a, b) => sessionTime(b) - sessionTime(a))
+        .slice(0, SEARCH_RESULT_LIMIT)
+        .map<Row>((s) => ({
+          type: 'session',
+          session: s,
+          name: sessionDisplayName(s, sessionDisplayNames),
+          projectLabel: projectLabelOf(s, otherLabel),
+        }));
+    }
+
     const pinnedSessions = sessions
       .filter((s) => s.pinned)
       .sort((a, b) => sessionTime(b) - sessionTime(a));
@@ -370,29 +357,23 @@ export function Sidebar() {
     const sorted = [...normalSessions].sort((a, b) => sessionTime(b) - sessionTime(a));
     const rows: Row[] = [];
 
-    // 置顶区:仅当存在置顶会话时渲染(空区不占黄金位置);插到列表最上方,
-    // 独立于 project/time 分组模式,且不被无限滚动裁掉(始终位于 rows 头部)。
-    // 折叠时仅保留头部(保留箭头切换),跳过其下置顶会话。
-    if (pinnedSessions.length > 0) {
-      rows.push({ type: 'pinned-header' });
-      if (!pinnedCollapsed) {
+    if (groupMode === 'time') {
+      // 时间模式:时间已常显在每行,不再渲染日期分类头,直接平铺。
+      // 置顶会话无项目可归,保留顶部置顶区 + 分隔线。
+      if (pinnedSessions.length > 0) {
         for (const s of pinnedSessions) {
           rows.push({ type: 'session', session: s, name: sessionDisplayName(s, sessionDisplayNames) });
         }
+        rows.push({ type: 'pinned-divider' });
       }
-    }
-
-    if (groupMode === 'time') {
-      for (const [category, arr] of groupSessionsByTime(sorted)) {
-        rows.push({ type: 'category', category });
-        for (const s of arr) {
-          rows.push({ type: 'session', session: s, name: sessionDisplayName(s, sessionDisplayNames) });
-        }
+      for (const s of sorted) {
+        rows.push({ type: 'session', session: s, name: sessionDisplayName(s, sessionDisplayNames) });
       }
     } else {
-      // 1. 按 projectPath 分组(路径统一 / 分隔,无路径归入"其他")
+      // 1. 按 projectPath 分组(路径统一 / 分隔,无路径归入"其他")。
+      //    置顶会话并入所属项目:因按「置顶 → 普通」顺序入组,项目内天然置顶最前。
       const projectMap = new Map<string, Session[]>();
-      for (const s of sorted) {
+      for (const s of [...pinnedSessions, ...sorted]) {
         const key = projectKeyOf(s);
         if (!projectMap.has(key)) projectMap.set(key, []);
         projectMap.get(key)!.push(s);
@@ -406,7 +387,7 @@ export function Sidebar() {
           const fullPath = projectKey === OTHER_PROJECT_KEY ? '' : projectKey;
           const name = fullPath
             ? fullPath.split('/').filter(Boolean).pop() || fullPath
-            : translate('session.other');
+            : t('session.other');
           return { projectKey, fullPath, name, sessions: arr, latest };
         })
         .sort((a, b) => b.latest - a.latest);
@@ -435,7 +416,7 @@ export function Sidebar() {
     // 虚拟会话(新建未持久化的 web-*)不显示在会话列表,列表仅由已持久化会话驱动,
     // 刷新后行为即天然一致(不会出现"当前会话消失/不一致")。
     return rows;
-  }, [sessions, groupMode, collapsedProjects, pinnedCollapsed, lang]);
+  }, [sessions, groupMode, collapsedProjects, sessionDisplayNames, t, searchQuery]);
 
   /** 当前活跃会话所属项目 key(用于项目头 has-active 高亮;虚拟会话归入"其他") */
   const activeProjectKey = useMemo(() => {
@@ -472,8 +453,10 @@ export function Sidebar() {
     setRenderedCount(next);
   }, [rows, groupMode, collapsedProjects, renderedCount]);
 
-  const visibleRows = rows.slice(0, renderedCount);
-  const hasMore = renderedCount < rows.length;
+  // 搜索态一次性渲染全部命中(上限 SEARCH_RESULT_LIMIT),不参与无限滚动分批
+  const searching = searchQuery.trim().length > 0;
+  const visibleRows = searching ? rows : rows.slice(0, renderedCount);
+  const hasMore = !searching && renderedCount < rows.length;
 
   // IntersectionObserver 无限滚动:滚动到底部附近时渲染下一批(对齐旧版 _attachSentinel)。
   // 依赖里必须包含 sidebarView:在「会话列表 ↔ 文件树」间切换时 .sidebar-body 会被卸载重建,
@@ -515,103 +498,8 @@ export function Sidebar() {
     return () => cancelAnimationFrame(raf);
   }, [hasMore, rows, renderedCount, sidebarView]);
 
-  // 玻璃主题:检测时间分类头是否吸顶命中,命中才加 .stuck 开启局部模糊。
-  // sticky 吸顶时其 top 会吸附到滚动容器(.sidebar-body)顶部,用该判据区分
-  // "正在吸顶"与"平时透明",避免未吸顶时也带 backdrop-filter。
-  useEffect(() => {
-    const body = bodyRef.current;
-    if (!body) return;
-    const apply = () => {
-      const bodyTop = body.getBoundingClientRect().top;
-      body.querySelectorAll<HTMLElement>('.session-category').forEach((el) => {
-        const stuck = el.getBoundingClientRect().top <= bodyTop + 1;
-        el.classList.toggle('stuck', stuck);
-      });
-    };
-    apply();
-    body.addEventListener('scroll', apply, { passive: true });
-    const ro = new ResizeObserver(apply);
-    ro.observe(body);
-    window.addEventListener('resize', apply);
-    return () => {
-      body.removeEventListener('scroll', apply);
-      ro.disconnect();
-      window.removeEventListener('resize', apply);
-    };
-    // rows 变化或视图在「会话列表 ↔ 文件树」间切换(.sidebar-body 会被卸载重建)时,
-    // 都需重新绑定滚动监听并对新容器做一次吸顶扫描,否则切回会话列表后模糊失效。
-  }, [rows, sidebarView]);
-
   return (
     <aside className={`sidebar${sidebarCollapsed ? ' hidden' : ''}`}>
-      {/* 顶部圆角胶囊工具栏(对齐旧版 .session-toolbar) */}
-      <div className="sidebar-toolbar">
-        <button
-          type="button"
-          className="toolbar-btn"
-          title={t('sidebar.collapse')}
-          aria-label={t('sidebar.collapse')}
-          onClick={() => setSidebarCollapsed(true)}
-        >
-          <svg viewBox="0 0 48 48" fill="none" stroke="currentColor" strokeWidth="4" strokeLinecap="round" strokeLinejoin="round">
-            <path d="M8 10.5H40" />
-            <path d="M24 19.5H40" />
-            <path d="M24 28.5H40" />
-            <path d="M8 37.5H40" />
-            <path d="M16 19L8 24L16 29V19Z" fill="none" />
-          </svg>
-        </button>
-
-        <button
-          type="button"
-          className="toolbar-btn"
-          title={t('chat.newSession')}
-          aria-label={t('chat.newSession')}
-          onClick={handleNewSession}
-        >
-          <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
-            <path d="M20.5 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h13.5a2 2 0 0 1 2 2z" />
-            <line x1="8" y1="10" x2="16" y2="10" />
-            <line x1="12" y1="6" x2="12" y2="14" />
-          </svg>
-        </button>
-
-        <div className="toolbar-spacer" />
-
-        {/* 侧栏视图切换胶囊(对齐旧版 .view-capsule:会话列表 ↔ 文件浏览) */}
-        <div className="sidebar-view-capsule">
-          <button
-            type="button"
-            className={`capsule-btn${sidebarView === 'sessions' ? ' active' : ''}`}
-            title={t('session.sessionList')}
-            aria-label={t('session.sessionList')}
-            onClick={() => switchSidebarView('sessions')}
-          >
-            <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-              <line x1="2" y1="4" x2="14" y2="4" />
-              <line x1="2" y1="8" x2="14" y2="8" />
-              <line x1="2" y1="12" x2="10" y2="12" />
-            </svg>
-          </button>
-          <button
-            type="button"
-            className={`capsule-btn${sidebarView === 'files' ? ' active' : ''}`}
-            title={t('session.fileBrowse')}
-            aria-label={t('session.fileBrowse')}
-            onClick={() => switchSidebarView('files')}
-          >
-            <svg viewBox="0 0 48 48" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="4" strokeLinecap="round" strokeLinejoin="round">
-              <circle cx="10" cy="24" r="4" fill="none" stroke="currentColor" strokeWidth="4" />
-              <circle cx="38" cy="10" r="4" fill="none" stroke="currentColor" strokeWidth="4" />
-              <circle cx="38" cy="24" r="4" fill="none" stroke="currentColor" strokeWidth="4" />
-              <circle cx="38" cy="38" r="4" fill="none" stroke="currentColor" strokeWidth="4" />
-              <path d="M34 38L22 38V10H34" stroke="currentColor" strokeWidth="4" strokeLinecap="round" strokeLinejoin="round" />
-              <path d="M14 24L34 24" stroke="currentColor" strokeWidth="4" strokeLinecap="round" strokeLinejoin="round" />
-            </svg>
-          </button>
-        </div>
-      </div>
-
       {sidebarView === 'files' ? (
         /* 文件树视图(对齐旧版 .file-tree-view,替代会话列表) */
         <div className="sidebar-file-tree">
@@ -629,24 +517,96 @@ export function Sidebar() {
         </div>
       ) : (
         <>
-      {/* header:图标 + 标题 + 分组切换 + 计数 */}
+      {/* header:标题(左) + 搜索 / 分组下拉(右);搜索时整行替换为输入框 */}
       <div className="sidebar-header">
-        <div className="sidebar-header-left">
-          <svg className="sidebar-header-icon" viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round">
-            <path d="M13.5 2H2.5a1 1 0 0 0-1 1v7a1 1 0 0 0 1 1h2.5l2 2 2-2h4.5a1 1 0 0 0 1-1V3a1 1 0 0 0-1-1z" />
-          </svg>
-          <span className="sidebar-title">{t('session.title')}</span>
-          <button
-            type="button"
-            className="group-mode-toggle"
-            title={t('session.toggleGroup')}
-            aria-label={t('session.toggleGroup')}
-            onClick={toggleGroupMode}
-          >
-            {t(groupMode === 'project' ? 'session.groupProject' : 'session.groupTime')}
-          </button>
-        </div>
-        <span className="sidebar-count">{sessions.length}</span>
+        {searchOpen ? (
+          <div className="sidebar-search">
+            <input
+              ref={searchInputRef}
+              className="sidebar-search-input"
+              type="text"
+              value={searchQuery}
+              placeholder={t('sidebar.searchPlaceholder')}
+              aria-label={t('sidebar.search')}
+              autoComplete="off"
+              onChange={(e) => setSearchQuery(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Escape') {
+                  e.preventDefault();
+                  closeSearch();
+                }
+              }}
+            />
+            {searching && (
+              <span className="sidebar-search-count">
+                {t('sidebar.searchResults', { n: rows.length })}
+              </span>
+            )}
+            <button
+              type="button"
+              className="sidebar-search-close"
+              title={t('sidebar.searchClose')}
+              aria-label={t('sidebar.searchClose')}
+              onClick={closeSearch}
+            >
+              ×
+            </button>
+          </div>
+        ) : (
+          <>
+            <span className="sidebar-title">{t('sidebar.history')}</span>
+            <span className="sidebar-header-spacer" />
+            <button
+              type="button"
+              className="sidebar-icon-btn"
+              title={t('sidebar.search')}
+              aria-label={t('sidebar.search')}
+              onClick={() => setSearchOpen(true)}
+            >
+              <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
+                <circle cx="11" cy="11" r="7" />
+                <line x1="21" y1="21" x2="16.7" y2="16.7" />
+              </svg>
+            </button>
+            <div className="sidebar-group" ref={groupMenuRef}>
+              <button
+                type="button"
+                className={`sidebar-icon-btn sidebar-group-btn${groupMenuOpen ? ' open' : ''}`}
+                title={`${t('session.toggleGroup')}：${t(groupMode === 'project' ? 'session.groupProject' : 'session.groupTime')}`}
+                aria-label={t('session.toggleGroup')}
+                aria-haspopup="menu"
+                aria-expanded={groupMenuOpen}
+                onClick={() => setGroupMenuOpen((open) => !open)}
+              >
+                <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M12 2L22 7L12 12L2 7L12 2Z" />
+                  <path d="M2 12L12 17L22 12" />
+                  <path d="M2 17L12 22L22 17" />
+                </svg>
+                <svg className="sidebar-group-caret" viewBox="0 0 8 8" width="9" height="9" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round">
+                  <polyline points="2 3 4 5 6 3" />
+                </svg>
+              </button>
+              {groupMenuOpen && (
+                <div className="sidebar-group-menu" role="menu">
+                  {(['project', 'time'] as const).map((mode) => (
+                    <button
+                      key={mode}
+                      type="button"
+                      role="menuitemradio"
+                      aria-checked={groupMode === mode}
+                      className={`sidebar-group-item${groupMode === mode ? ' active' : ''}`}
+                      onClick={() => changeGroupMode(mode)}
+                    >
+                      <span className="sidebar-group-check">✓</span>
+                      {t(mode === 'project' ? 'session.groupProject' : 'session.groupTime')}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          </>
+        )}
       </div>
 
       <div className="sidebar-body" ref={bodyRef}>
@@ -660,33 +620,15 @@ export function Sidebar() {
         )}
 
         {!isLoading && !error && rows.length === 0 && (
-          <p className="sidebar-empty">{t('sidebar.empty')}</p>
+          <p className="sidebar-empty">{searching ? t('sidebar.searchEmpty') : t('sidebar.empty')}</p>
         )}
 
         {!isLoading && rows.length > 0 && (
           <div className="session-list">
             {visibleRows.map((row) => {
-              if (row.type === 'pinned-header') {
-                return (
-                  <div key="pinned-header" className="session-pinned-header">
-                    {/* 置顶区头:图钉图标 + 置顶标题 */}
-                    <svg viewBox="0 0 48 48" width="12" height="12" fill="none" stroke="currentColor" strokeWidth="4" strokeLinejoin="round">
-                      <path d="M10.6963 17.5042C13.3347 14.8657 16.4701 14.9387 19.8781 16.8076L32.62 9.74509L31.8989 4.78683L43.2126 16.1005L38.2656 15.3907L31.1918 28.1214C32.9752 31.7589 33.1337 34.6647 30.4953 37.3032C30.4953 37.3032 26.235 33.0429 22.7171 29.525L6.44305 41.5564L18.4382 25.2461C14.9202 21.7281 10.6963 17.5042 10.6963 17.5042Z" />
-                    </svg>
-                    <span className="session-pinned-header-title">{t('sidebar.pinned')}</span>
-                    <button
-                      type="button"
-                      className={`session-pinned-collapse${pinnedCollapsed ? ' collapsed' : ''}`}
-                      title={pinnedCollapsed ? t('sidebar.expandPinned') : t('sidebar.collapsePinned')}
-                      aria-label={pinnedCollapsed ? t('sidebar.expandPinned') : t('sidebar.collapsePinned')}
-                      onClick={togglePinnedCollapsed}
-                    >
-                      <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                        <polyline points="6 9 12 15 18 9" />
-                      </svg>
-                    </button>
-                  </div>
-                );
+              if (row.type === 'pinned-divider') {
+                // 置顶区与普通列表之间的细分隔(无标题栏)
+                return <div key="pinned-divider" className="session-pinned-divider" />;
               }
               if (row.type === 'project-header') {
                 return (
@@ -702,24 +644,14 @@ export function Sidebar() {
                   />
                 );
               }
-              if (row.type === 'category') {
-                return (
-                  <div key={row.category} className="session-category">
-                    {/* 时间分类头:时钟图标 + 分类文案,语义贴合时间分组 */}
-                    <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                      <circle cx="12" cy="12" r="10" />
-                      <polyline points="12 6 12 12 16 14" />
-                    </svg>
-                    {t(CATEGORY_KEYS[row.category])}
-                  </div>
-                );
-              }
               return (
                 <SessionItem
                   key={row.session.id}
                   session={row.session}
                   active={row.session.id === currentSessionId}
                   onSelect={() => setCurrentSession(row.session.id)}
+                  highlight={searching ? searchQuery.trim().toLowerCase() : undefined}
+                  projectLabel={row.projectLabel}
                 />
               );
             })}
@@ -812,14 +744,20 @@ interface SessionItemProps {
   session: Session;
   active: boolean;
   onSelect: () => void;
+  /** 搜索态:高亮关键字(小写) */
+  highlight?: string;
+  /** 搜索态:行内附带所属项目名 */
+  projectLabel?: string;
 }
 
-function SessionItem({ session, active, onSelect }: SessionItemProps) {
+function SessionItem({ session, active, onSelect, highlight, projectLabel }: SessionItemProps) {
   const { t } = useI18n();
   const updateSession = useAppStore((s) => s.updateSession);
   const removeSession = useAppStore((s) => s.removeSession);
   const setCurrentSession = useAppStore((s) => s.setCurrentSession);
   const sessionDisplayNames = useAppStore((s) => s.sessionDisplayNames);
+  // 已在标签栏打开:纯提示标记,优先级低于运行中/待确认/完成未读
+  const inTabs = useAppStore((s) => s.openTabs.includes(session.id));
 
   // 前端活跃流(对应会话在 sessionStreams 分区内的流式/工具调用进行中)——
   // 切走/新建其他会话后,原会话后台仍在流式,借此在会话项上提示续看。
@@ -986,7 +924,9 @@ function SessionItem({ session, active, onSelect }: SessionItemProps) {
             onClick={(e) => e.stopPropagation()}
           />
         ) : (
-          <span className="session-item-name">{title}</span>
+          <span className="session-item-name">
+            {highlight ? <HighlightedText text={title} query={highlight} /> : title}
+          </span>
         )}
       </div>
 
@@ -1017,8 +957,21 @@ function SessionItem({ session, active, onSelect }: SessionItemProps) {
         !renaming && (
           <>
             <div className="session-item-meta">
-              <span className="session-item-mode">{session.mode ?? 'coding'}</span>
+              {projectLabel && (
+                <span className="session-item-project" title={projectLabel}>{projectLabel}</span>
+              )}
               <span className="session-item-time">{time}</span>
+              {session.pinned && (
+                <span className="session-pin-mark" title={t('sidebar.pinned')}>
+                  <svg viewBox="0 0 48 48" width="11" height="11" fill="none" stroke="currentColor" strokeWidth="4" strokeLinejoin="round">
+                    <path d="M10.6963 17.5042C13.3347 14.8657 16.4701 14.9387 19.8781 16.8076L32.62 9.74509L31.8989 4.78683L43.2126 16.1005L38.2656 15.3907L31.1918 28.1214C32.9752 31.7589 33.1337 34.6647 30.4953 37.3032C30.4953 37.3032 26.235 33.0429 22.7171 29.525L6.44305 41.5564L18.4382 25.2461C14.9202 21.7281 10.6963 17.5042 10.6963 17.5042Z" />
+                  </svg>
+                </span>
+              )}
+              {/* 已在标签栏打开:与标签栏联动的灰点,放在行尾保持左侧状态图标区干净 */}
+              {!awaitingConfirm && !streaming && !completedUnread && inTabs && (
+                <span className="session-opened-mark" title={t('chat.tabOpened')} />
+              )}
             </div>
             {/* hover 操作按钮(对齐旧版 .session-actions) */}
             <div className="session-actions">
@@ -1077,12 +1030,44 @@ function SessionItem({ session, active, onSelect }: SessionItemProps) {
   );
 }
 
-/** 时间戳格式化为简短显示 */
+/** 时间戳格式化为相对时间(刚刚 / N 分钟前 / N 小时前 / 昨天 / N 天前 / N 周前) */
 function formatTime(timestamp: string): string {
   const n = Number(timestamp);
-  if (!Number.isFinite(n)) return '';
+  if (!Number.isFinite(n) || n <= 0) return '';
+  const diff = Date.now() - n;
+  if (diff < 60_000) return translate('sidebar.timeJustNow');
+  if (diff < 3_600_000) {
+    return translate('sidebar.timeMinutes', { n: Math.floor(diff / 60_000) });
+  }
+  if (diff < 86_400_000) {
+    return translate('sidebar.timeHours', { n: Math.floor(diff / 3_600_000) });
+  }
+  const days = Math.floor(diff / 86_400_000);
+  if (days === 1) return translate('sidebar.timeYesterday');
+  if (days < 7) return translate('sidebar.timeDays', { n: days });
+  if (days < 30) return translate('sidebar.timeWeeks', { n: Math.floor(days / 7) });
+  if (days < 365) return translate('sidebar.timeMonths', { n: Math.floor(days / 30) });
+  // 超过一年:回落到绝对日期,避免"13 个月前"这类难读的表述
   const date = new Date(n);
-  // 简化显示:MM-DD HH:mm
   const pad = (x: number) => x.toString().padStart(2, '0');
-  return `${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+}
+
+/** 搜索命中片段高亮(大小写不敏感,高亮所有出现位置) */
+function HighlightedText({ text, query }: { text: string; query: string }) {
+  const lower = text.toLowerCase();
+  const idx = lower.indexOf(query);
+  if (idx < 0) return <>{text}</>;
+
+  const parts: ReactNode[] = [];
+  let from = 0;
+  let hit = idx;
+  while (hit >= 0) {
+    if (hit > from) parts.push(text.slice(from, hit));
+    parts.push(<mark key={hit}>{text.slice(hit, hit + query.length)}</mark>);
+    from = hit + query.length;
+    hit = lower.indexOf(query, from);
+  }
+  if (from < text.length) parts.push(text.slice(from));
+  return <>{parts}</>;
 }
