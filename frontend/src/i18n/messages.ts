@@ -186,8 +186,8 @@ export const zh: Record<string, string> = {
   'chat.clearWarnings': '清除警告',
   'chat.removeImage': '移除 {name}',
   'chat.moreImages': '还有 {count} 张图片',
-  'chat.uploadImage': '上传图片',
-  'chat.addImageTitle': '添加图片(也可在输入框中直接粘贴)',
+  'chat.addAttachment': '添加附件',
+  'chat.addAttachmentTitle': '添加附件(也可在输入框中直接粘贴文件)',
   'chat.readImageFailedUpload': '读取图片失败: {name}{err}',
 
   /* ==================== Lightbox 图片灯箱 ==================== */
@@ -457,6 +457,7 @@ export const zh: Record<string, string> = {
   'preview.loading': '加载中…',
   'preview.loadFailed': '加载失败({status})',
   'preview.imageLoadFailed': '图片加载失败',
+  'preview.videoUnsupported': '当前格式无法播放,请使用本地播放器打开',
   'preview.actionClose': '关闭',
   'preview.actionSwitch': '切换',
   'preview.unsavedSingle': '{name} 有未保存的改动,{action}将丢弃这些修改。确定{action}吗?',
@@ -1975,8 +1976,8 @@ export const en: Record<string, string> = {
   'chat.clearWarnings': 'Clear warnings',
   'chat.removeImage': 'Remove {name}',
   'chat.moreImages': '{count} more images',
-  'chat.uploadImage': 'Upload image',
-  'chat.addImageTitle': 'Add image (or paste directly in the input)',
+  'chat.addAttachment': 'Add attachment',
+  'chat.addAttachmentTitle': 'Add attachment (or paste files directly in the input)',
   'chat.readImageFailedUpload': 'Failed to read image: {name}{err}',
 
   /* ==================== Lightbox 图片灯箱 ==================== */
@@ -2244,6 +2245,7 @@ export const en: Record<string, string> = {
   'preview.loading': 'Loading…',
   'preview.loadFailed': 'Failed to load ({status})',
   'preview.imageLoadFailed': 'Image failed to load',
+  'preview.videoUnsupported': 'This video format cannot be played here, open it locally',
   'preview.actionClose': 'Close',
   'preview.actionSwitch': 'Switch',
   'preview.unsavedSingle': ' has unsaved changes, {action} will discard these modifications. Confirm {action}?',
