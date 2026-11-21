@@ -26,12 +26,14 @@ import com.example.agent.llm.model.WebSearchAction;
 import com.example.agent.llm.stream.StreamChunk;
 import com.example.agent.service.TokenEstimatorFactory;
 import com.example.agent.tools.BashProcessManager;
+import com.example.agent.tools.BashResult;
 import com.example.agent.tools.BashTool;
 import com.example.agent.tools.DeleteFileTool;
 import com.example.agent.tools.FileChangeTracker;
 import com.example.agent.tools.ToolExecutor;
 import com.example.agent.tools.ToolRegistry;
 import com.example.agent.web.session.PendingBashConfirmation;
+import com.example.agent.web.session.PendingCompactConfirmation;
 import com.example.agent.web.session.PendingDeleteConfirmation;
 import com.example.agent.web.session.PendingToolCall;
 import com.example.agent.web.session.SessionCancelManager;
@@ -236,11 +238,15 @@ public class WebAgentOrchestrator {
             }
 
             // 防御：如果已有挂起的确认弹窗，不进入新一轮 LLM 调用
-            if (sessionManager.hasPendingBashConfirmation(sessionId) || sessionManager.hasPendingDeleteConfirmation(sessionId)) {
+            if (sessionManager.hasPendingBashConfirmation(sessionId)
+                    || sessionManager.hasPendingDeleteConfirmation(sessionId)
+                    || sessionManager.hasPendingCompactConfirmation(sessionId)) {
                 if (sessionManager.hasPendingBashConfirmation(sessionId)) {
                     logger.info("检测到挂起的 bash 确认，暂停当前 Agent 循环 (sessionId={}, turn={})", sessionId, turn + 1);
-                } else {
+                } else if (sessionManager.hasPendingDeleteConfirmation(sessionId)) {
                     logger.info("检测到挂起的 delete_file 确认，暂停当前 Agent 循环 (sessionId={}, turn={})", sessionId, turn + 1);
+                } else {
+                    logger.info("检测到挂起的 compact_context 确认，暂停当前 Agent 循环 (sessionId={}, turn={})", sessionId, turn + 1);
                 }
                 return;
             }
@@ -248,6 +254,9 @@ public class WebAgentOrchestrator {
             List<Message> messages = new ArrayList<>(getConversationService().getContextForInference(conversation));
 
             messages = ensureSystemMessageFirst(messages);
+
+            // 后台进程结束/被用户停止的通知：追加到本轮系统提示，让模型及时感知
+            injectBackgroundNotices(sessionId, messages);
 
             StringBuilder contentBuilder = new StringBuilder();
             StringBuilder reasoningBuilder = new StringBuilder();
@@ -700,6 +709,46 @@ public class WebAgentOrchestrator {
             try (var _session = FileChangeTracker.withContext(sessionId, null)) {
                 RequestContext.set(RequestContext.ContextType.WEB);
 
+                // compact_context：模型自产交接笔记 + 用户确认后替换上下文。
+                // 该工具必须单独调用，避免同轮多个 tool_call 的结果无法对齐。
+                if ("compact_context".equals(toolName)) {
+                    JsonNode args = objectMapper.readTree(arguments);
+                    String summary = args != null && args.hasNonNull("summary")
+                        ? args.get("summary").asText("") : "";
+
+                    if (summary.isBlank()) {
+                        String errorMsg = "summary 参数不能为空";
+                        getConversationService().addToolResult(conversation, toolCall.getId(), toolName, "错误: " + errorMsg, false);
+                        sseWriter.sendSseEvent("tool_result",
+                            buildToolResultJson(toolCall.getId(), toolName, false, null, errorMsg, arguments, toolCall.getId()));
+                        continue;
+                    }
+
+                    if (toolCalls.size() > 1) {
+                        String errorMsg = "compact_context 必须单独调用，不能与其他工具放在同一轮";
+                        getConversationService().addToolResult(conversation, toolCall.getId(), toolName, "错误: " + errorMsg, false);
+                        sseWriter.sendSseEvent("tool_result",
+                            buildToolResultJson(toolCall.getId(), toolName, false, null, errorMsg, arguments, toolCall.getId()));
+                        continue;
+                    }
+
+                    String confirmId = java.util.UUID.randomUUID().toString();
+                    int currentTokens = TokenEstimatorFactory.getDefault()
+                        .estimateConversationTokens(conversation.getMessages());
+                    int summaryTokens = TokenEstimatorFactory.getDefault().estimateTextTokens(summary);
+
+                    PendingCompactConfirmation pending = new PendingCompactConfirmation(
+                        confirmId, toolCall.getId(), toolName, summary, arguments, currentTokens, summaryTokens
+                    );
+                    sessionManager.setPendingCompactConfirmation(sessionId, pending);
+
+                    sseWriter.sendSseEvent("tool_confirmation",
+                        buildCompactConfirmJson(confirmId, summary, currentTokens, summaryTokens));
+                    logger.info("发送 compact_context 确认事件: confirmId={}, currentTokens={}, summaryTokens={}",
+                        confirmId, currentTokens, summaryTokens);
+                    return false;
+                }
+
                 // 对 bash 工具做预检查：三级安全模型
                 if ("bash".equals(toolName)) {
                     JsonNode args = objectMapper.readTree(arguments);
@@ -717,7 +766,7 @@ public class WebAgentOrchestrator {
                         }
 
                         if (hookResult.isConfirmationRequired()) {
-                            // 是否弹确认卡片完全由 bash 的"需要确认"开关决定；权限范围（仅工作区/全目录）不影响确认。
+                            // 是否弹确认卡片完全由 bash 的"需要确认"开关决定；权限范围（标准/全目录）不影响确认。
                             // 严格禁止（denied）的命令不受影响，无论什么范围仍会被拦截。
                             boolean skipConfirm = !Config.getInstance().getTools().getBash().isRequireConfirmation();
                             if (skipConfirm) {
@@ -765,6 +814,7 @@ public class WebAgentOrchestrator {
                     if (executor != null) {
                         long[] lastProgressTime = {0};
                         BashTool.setCurrentToolCallId(toolCall.getId());
+                        BashProcessManager.getInstance().bindSession(toolCall.getId(), sessionId);
                         try {
                             String rawResult = executor.execute(args, line -> {
                                 long now = System.currentTimeMillis();
@@ -779,9 +829,23 @@ public class WebAgentOrchestrator {
                             boolean cancelFailed = BashProcessManager.getInstance().consumeCancelFailed(toolCall.getId());
                             boolean toolSuccess = !cancelFailed;
                             String truncatedResult = truncationService.truncateToolOutput(toolName, rawResult);
-                            getConversationService().addToolResult(conversation, toolCall.getId(), toolName, truncatedResult, toolSuccess);
+                            // 后台状态以结构化字段下发，避免前端解析结果文本
+                            BashResult bashResult = BashTool.peekResult(toolCall.getId());
+                            ObjectNode extra = null;
+                            Map<String, Object> detailOverrides = null;
+                            if (bashResult != null && bashResult.backgroundStarted()) {
+                                boolean promoted = !args.path("run_in_background").asBoolean(false);
+                                extra = objectMapper.createObjectNode();
+                                extra.put("background", true);
+                                extra.put("promoted", promoted);
+                                extra.put("pid", bashResult.pid());
+                                detailOverrides = new HashMap<>();
+                                detailOverrides.put("promoted", promoted);
+                            }
+                            getConversationService().addToolResult(
+                                conversation, toolCall.getId(), toolName, truncatedResult, toolSuccess, detailOverrides);
                             sseWriter.sendSseEvent("tool_result",
-                                buildToolResultJson(toolCall.getId(), toolName, toolSuccess, truncatedResult, null, arguments, toolCall.getId()));
+                                buildToolResultJson(toolCall.getId(), toolName, toolSuccess, truncatedResult, null, arguments, toolCall.getId(), extra));
                             SessionTokenStats stats = sessionManager.getOrCreateSessionTokenStats(sessionId);
                             stats.addToolCall();
                         } finally {
@@ -937,7 +1001,9 @@ public class WebAgentOrchestrator {
                 executeToolCalls(remaining, conversation, sseWriter, sessionId, mode);
                 // 执行剩余工具时又触发了新的确认弹窗（如第二个 bash/delete_file 也需确认），
                 // 等待用户确认，不进入下一轮 Agent 循环
-                if (sessionManager.hasPendingBashConfirmation(sessionId) || sessionManager.hasPendingDeleteConfirmation(sessionId)) {
+                if (sessionManager.hasPendingBashConfirmation(sessionId)
+                        || sessionManager.hasPendingDeleteConfirmation(sessionId)
+                        || sessionManager.hasPendingCompactConfirmation(sessionId)) {
                     logger.info("剩余工具执行中触发了新的确认弹窗，等待用户确认 (sessionId={})", sessionId);
                     return;
                 }
@@ -980,6 +1046,30 @@ public class WebAgentOrchestrator {
     }
 
     /**
+     * 把待投递的后台进程状态通知追加到系统提示（仅本次请求，不写入会话历史）。
+     * <p>
+     * 通知由 {@link BashProcessManager} 在后台进程自然退出或被用户停止时入队；
+     * 这里在每次调用 LLM 前取出，让模型知道进程已经不在了。
+     */
+    private static void injectBackgroundNotices(String sessionId, List<Message> messages) {
+        List<String> notices = BashProcessManager.getInstance().drainNotices(sessionId);
+        if (notices.isEmpty()) {
+            return;
+        }
+        String noticeText = "[后台进程状态更新]\n" + String.join("\n", notices);
+        if (!messages.isEmpty() && messages.get(0).isSystem()) {
+            Message original = messages.get(0);
+            Message copy = original.shallowCopy();
+            String base = copy.getContent();
+            copy.setContent((base == null || base.isEmpty() ? "" : base + "\n\n") + noticeText);
+            messages.set(0, copy);
+        } else {
+            messages.add(0, Message.system(noticeText));
+        }
+        logger.info("已注入后台进程状态通知: sessionId={}, count={}", sessionId, notices.size());
+    }
+
+    /**
      * 将 session 中存储的 mode 字符串解析为 AgentMode 枚举。
      * null / 空 / 无法识别时返回默认的 CODING 模式。
      */
@@ -1005,6 +1095,17 @@ public class WebAgentOrchestrator {
     private static String buildToolResultJson(String id, String name, boolean success,
                                                String resultContent, String errorContent,
                                                String argsJson, String toolCallId) {
+        return buildToolResultJson(id, name, success, resultContent, errorContent, argsJson, toolCallId, null);
+    }
+
+    /**
+     * 构造 tool_result 事件 JSON。
+     *
+     * @param extra 额外结构化字段（如 bash 的 background/promoted/pid），为 null 时不附加
+     */
+    private static String buildToolResultJson(String id, String name, boolean success,
+                                               String resultContent, String errorContent,
+                                               String argsJson, String toolCallId, ObjectNode extra) {
         ObjectNode node = objectMapper.createObjectNode();
         node.put("id", id);
         node.put("name", name);
@@ -1016,6 +1117,9 @@ public class WebAgentOrchestrator {
             node.put("error", errorContent);
         }
         node.set("args", safeArgs(argsJson, toolCallId));
+        if (extra != null) {
+            node.setAll(extra);
+        }
         return node.toString();
     }
 
@@ -1123,6 +1227,24 @@ public class WebAgentOrchestrator {
         ObjectNode node = objectMapper.createObjectNode();
         node.put("id", id);
         node.put("line", line);
+        return node.toString();
+    }
+
+    /**
+     * 使用 ObjectMapper 安全构建 compact_context 确认 SSE 事件 JSON。
+     */
+    private static String buildCompactConfirmJson(String confirmId, String summary,
+                                                   int currentTokens, int summaryTokens) {
+        ObjectNode node = objectMapper.createObjectNode();
+        node.put("confirmId", confirmId);
+        node.put("toolType", "compact_context");
+        node.put("summary", summary);
+        node.put("currentTokens", currentTokens);
+        node.put("summaryTokens", summaryTokens);
+        int savedTokens = Math.max(0, currentTokens - summaryTokens);
+        node.put("savedTokens", savedTokens);
+        double savedPercent = currentTokens > 0 ? savedTokens * 100.0 / currentTokens : 0;
+        node.put("savedPercent", Math.round(savedPercent * 10.0) / 10.0);
         return node.toString();
     }
 

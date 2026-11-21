@@ -7,7 +7,6 @@ import com.example.agent.context.BudgetWarningInjector;
 import com.example.agent.context.ContextWindow;
 import com.example.agent.desktop.WorkspaceContext;
 import com.example.agent.context.SessionCompactionState;
-import com.example.agent.context.compressor.AutoCompactTrigger;
 import com.example.agent.context.config.ContextConfig;
 import com.example.agent.domain.conversation.Conversation;
 import com.example.agent.domain.truncation.TruncationService;
@@ -56,7 +55,6 @@ public class ConversationService {
 
     private static class ConversationComponents {
         final BudgetWarningInjector warningInjector;
-        final AutoCompactTrigger autoCompactTrigger;
         final MemoryRetriever memoryRetriever;
         final SessionMemoryExtractor sessionMemoryExtractor;
         final MemoryExtractor memoryExtractor;
@@ -65,7 +63,6 @@ public class ConversationService {
         final SessionCompactionState compactionState;
 
         ConversationComponents(BudgetWarningInjector warningInjector,
-                                AutoCompactTrigger autoCompactTrigger,
                                 MemoryRetriever memoryRetriever,
                                 SessionMemoryExtractor sessionMemoryExtractor,
                                 MemoryExtractor memoryExtractor,
@@ -73,7 +70,6 @@ public class ConversationService {
                                 SessionTranscript transcript,
                                 SessionCompactionState compactionState) {
             this.warningInjector = warningInjector;
-            this.autoCompactTrigger = autoCompactTrigger;
             this.memoryRetriever = memoryRetriever;
             this.sessionMemoryExtractor = sessionMemoryExtractor;
             this.memoryExtractor = memoryExtractor;
@@ -185,13 +181,6 @@ public class ConversationService {
         BudgetWarningInjector warningInjector = new BudgetWarningInjector(contextWindow);
         warningInjector.register();
 
-        AutoCompactTrigger autoCompactTrigger = new AutoCompactTrigger(
-            contextWindow,
-            tokenEstimator,
-            sessionId
-        );
-        autoCompactTrigger.register();
-
         // 使用 DI 容器中的 MemoryRetriever（由 MemoryModule 初始化）
         MemoryRetriever memoryRetriever;
         try {
@@ -232,7 +221,6 @@ public class ConversationService {
 
         componentRegistry.put(sessionId, new ConversationComponents(
             warningInjector,
-            autoCompactTrigger,
             memoryRetriever,
             sessionMemoryExtractor,
             memoryExtractor,
@@ -474,7 +462,41 @@ public class ConversationService {
         addToolResult(conversation, toolCallId, toolName, content, true);
     }
 
+    /**
+     * 记录压缩边界：先追加 compaction 边界与交接笔记到 JSONL，再更新内存上下文起点。
+     * <p>
+     * 旧消息仍保留在 UI 历史中，但模型从交接笔记开始推理；重启恢复时同样从边界之后加载。
+     * </p>
+     */
+    public Message appendCompactionBoundary(Conversation conversation, String handoffContent) {
+        Message handoff = Message.user(handoffContent);
+        ConversationComponents components = getComponents(conversation);
+        if (components != null) {
+            components.transcript.appendCompactBoundary(handoff.getId());
+            components.transcript.appendUserMessage(handoff);
+            components.transcript.forceFlush();
+        }
+        // 先移动上下文起点，再追加交接笔记：避免瞬间按旧历史重算预算并注入过期提醒
+        int startIndex = conversation.getMessages().size();
+        conversation.setContextStartIndex(startIndex);
+        conversation.addMessage(handoff);
+        logger.info("上下文压缩边界已写入: sessionId={}, startIndex={}, handoffTokens≈{}",
+            conversation.getSessionId(), conversation.getContextStartIndex(),
+            tokenEstimator.estimateTextTokens(handoffContent));
+        return handoff;
+    }
+
     public void addToolResult(Conversation conversation, String toolCallId, String toolName, String content, boolean success) {
+        addToolResult(conversation, toolCallId, toolName, content, success, null);
+    }
+
+    /**
+     * 记录工具结果，可附带额外的结构化明细（如 bash 的 promoted 标记）。
+     *
+     * @param detailOverrides 追加/覆盖到 tool_result_detail 的字段；null 表示不附加
+     */
+    public void addToolResult(Conversation conversation, String toolCallId, String toolName,
+                              String content, boolean success, Map<String, Object> detailOverrides) {
         String truncated = truncationService.truncateToolOutput(toolName, content);
         Message message = Message.toolResult(toolCallId, toolName, truncated);
         message.setToolSuccess(success);
@@ -482,7 +504,11 @@ public class ConversationService {
             // 消费 BashTool 保留的结构化结果，随转录持久化（exitCode/stderr/output），供分析与回放
             var detail = BashTool.consumeResult(toolCallId);
             if (detail != null) {
-                message.setToolResultDetail(detail.toDetailMap());
+                Map<String, Object> detailMap = new java.util.LinkedHashMap<>(detail.toDetailMap());
+                if (detailOverrides != null) {
+                    detailMap.putAll(detailOverrides);
+                }
+                message.setToolResultDetail(detailMap);
             }
         }
         addMessage(conversation, message, success);
@@ -729,7 +755,13 @@ public class ConversationService {
             return result;
         }
 
-        int totalTokens = tokenEstimator.estimate(allMessages);
+        // 存在压缩边界时，恢复决策只按边界之后的内容计算，避免旧历史再次触发"智能恢复"
+        int boundaryIndex = loadResult.getBoundaryMessageIndex();
+        List<Message> messagesForResume = boundaryIndex >= 0
+            ? new ArrayList<>(allMessages.subList(boundaryIndex, allMessages.size()))
+            : allMessages;
+
+        int totalTokens = tokenEstimator.estimate(messagesForResume);
         int maxTokens = conversation.getContextWindow().getBudget().getMaxTokens();
         int tokenThreshold = (int) (maxTokens * 0.7);
         logger.info("Token 统计：totalTokens={}, maxTokens={}, threshold={}", totalTokens, maxTokens, tokenThreshold);
@@ -739,7 +771,7 @@ public class ConversationService {
             String memoryContent = memoryManager.read();
             int memoryTokens = tokenEstimator.estimateTextTokens(memoryContent);
 
-            List<Message> recentMessages = extractRecentMessages(allMessages, maxTokens - memoryTokens - 500);
+            List<Message> recentMessages = extractRecentMessages(messagesForResume, maxTokens - memoryTokens - 500);
             int recentTokens = tokenEstimator.estimate(recentMessages);
 
             conversation.clear();
@@ -767,6 +799,10 @@ public class ConversationService {
             conversation.clear();
             conversation.addMessage(Message.system(conversation.getSystemPrompt()));
             conversation.addMessages(allMessages);
+            if (loadResult.getBoundaryMessageIndex() >= 0) {
+                // +1 补偿首条 system 消息：模型上下文从压缩边界之后开始
+                conversation.setContextStartIndex(loadResult.getBoundaryMessageIndex() + 1);
+            }
 
             result.status = ResumeResult.Status.RESUMED_FULL;
             result.totalMessages = allMessages.size();

@@ -5,7 +5,9 @@ import com.example.agent.core.di.ServiceLocator;
 import com.example.agent.domain.conversation.Conversation;
 import com.example.agent.domain.truncation.TruncationService;
 import com.example.agent.llm.exception.LlmException;
+import com.example.agent.llm.model.Message;
 import com.example.agent.service.TokenEstimatorFactory;
+import com.example.agent.tools.BashProcessManager;
 import com.example.agent.tools.BashTool;
 import com.example.agent.tools.DeleteFileTool;
 import com.example.agent.tools.FileChangeTracker;
@@ -14,6 +16,7 @@ import com.example.agent.tools.ToolExecutor;
 import com.example.agent.tools.ToolRegistry;
 import com.example.agent.web.orchestrator.WebAgentOrchestrator;
 import com.example.agent.web.session.PendingBashConfirmation;
+import com.example.agent.web.session.PendingCompactConfirmation;
 import com.example.agent.web.session.PendingDeleteConfirmation;
 import com.example.agent.web.session.SessionManager;
 import com.example.agent.web.session.WebSessionManager;
@@ -80,15 +83,19 @@ public class ToolConfirmHandler implements HttpHandler {
                 return;
             }
 
-            // 拉取待确认的命令（先尝试 bash，再尝试 delete_file）
-            PendingBashConfirmation bashPending = sessionManager.pollPendingBashConfirmation(sessionId);
+            // 拉取待确认的操作（依次尝试 compact_context、bash、delete_file）
+            PendingCompactConfirmation compactPending = sessionManager.pollPendingCompactConfirmation(sessionId);
+            PendingBashConfirmation bashPending = null;
             PendingDeleteConfirmation deletePending = null;
 
-            if (bashPending == null) {
+            if (compactPending == null) {
+                bashPending = sessionManager.pollPendingBashConfirmation(sessionId);
+            }
+            if (compactPending == null && bashPending == null) {
                 deletePending = sessionManager.pollPendingDeleteConfirmation(sessionId);
             }
 
-            if (bashPending == null && deletePending == null) {
+            if (compactPending == null && bashPending == null && deletePending == null) {
                 sendJsonError(exchange, 404, "未找到待确认的命令，可能已超时或被清理");
                 return;
             }
@@ -108,7 +115,10 @@ public class ToolConfirmHandler implements HttpHandler {
             ToolRegistry toolRegistry = ServiceLocator.get(ToolRegistry.class);
             Conversation conversation = sessionManager.getOrCreateConversation(sessionId, null);
 
-            if (bashPending != null) {
+            if (compactPending != null) {
+                handleCompactConfirmation(compactPending, sessionId, confirmId, decision,
+                    sseWriter, conversationService, conversation);
+            } else if (bashPending != null) {
                 handleBashConfirmation(bashPending, sessionId, confirmId, decision,
                     sseWriter, conversationService, toolRegistry, conversation, objectMapper);
             } else {
@@ -129,6 +139,7 @@ public class ToolConfirmHandler implements HttpHandler {
             if (sessionId != null) {
                 sessionManager.clearPendingBashConfirmation(sessionId);
                 sessionManager.clearPendingDeleteConfirmation(sessionId);
+                sessionManager.clearPendingCompactConfirmation(sessionId);
             }
             try {
                 sendJsonError(exchange, 500, "处理失败: " + e.getMessage());
@@ -183,6 +194,7 @@ public class ToolConfirmHandler implements HttpHandler {
                 String result;
                 try (var _ctx = FileChangeTracker.withContext(sessionId, pending.toolCallId)) {
                     BashTool.setCurrentToolCallId(pending.toolCallId);
+                    BashProcessManager.getInstance().bindSession(pending.toolCallId, sessionId);
                     result = executor.execute(arguments, progressCallback);
                 } finally {
                     BashTool.clearCurrentToolCallId();
@@ -300,6 +312,66 @@ public class ToolConfirmHandler implements HttpHandler {
         } catch (LlmException e) {
             logger.error("继续 Agent 循环失败", e);
         }
+    }
+
+    private void handleCompactConfirmation(PendingCompactConfirmation pending, String sessionId,
+                                           String confirmId, String decision,
+                                           SseWriter sseWriter, ConversationService conversationService,
+                                           Conversation conversation) throws LlmException {
+        if (pending.isExpired(CONFIRM_TIMEOUT_MS)) {
+            logger.warn("compact_context 确认超时：confirmId={}", confirmId);
+            conversationService.addToolResult(
+                conversation, pending.toolCallId, pending.toolName, "错误: 确认已超时", false);
+            sseWriter.sendSseEvent("tool_result",
+                buildToolResultJson(pending.toolCallId, pending.toolName, false, null, "确认已超时",
+                    safeArgs(pending.arguments, pending.toolCallId)));
+            orchestrator.continueAfterConfirmation(sessionId, conversation, sseWriter);
+            return;
+        }
+
+        if (!pending.confirmId.equals(confirmId)) {
+            conversationService.addToolResult(
+                conversation, pending.toolCallId, pending.toolName, "错误: confirmId 不匹配", false);
+            return;
+        }
+
+        if ("allow".equals(decision)) {
+            logger.info("用户确认压缩上下文：confirmId={}, currentTokens={}, summaryTokens={}",
+                confirmId, pending.currentTokens, pending.summaryTokens);
+
+            // 先补一条 tool 结果到旧 transcript，保证历史结构完整；随后写入压缩边界。
+            conversationService.addToolResult(
+                conversation, pending.toolCallId, pending.toolName, "上下文已压缩", true);
+            Message handoff = conversationService.appendCompactionBoundary(
+                conversation, buildHandoffContent(pending.summary));
+
+            // 通知前端插入「上下文已压缩」分隔标识（重载后由历史消息内容自行识别）
+            ObjectNode compactEvent = objectMapper.createObjectNode();
+            compactEvent.put("messageId", handoff.getId());
+            compactEvent.put("summary", pending.summary);
+            sseWriter.sendSseEvent("compact_complete", compactEvent.toString());
+
+            sseWriter.sendSseEvent("tool_result",
+                buildToolResultJson(pending.toolCallId, pending.toolName, true,
+                    "上下文已压缩，后续将从交接笔记继续", null,
+                    safeArgs(pending.arguments, pending.toolCallId)));
+        } else {
+            logger.info("用户取消压缩上下文：confirmId={}", confirmId);
+            conversationService.addToolResult(
+                conversation, pending.toolCallId, pending.toolName, "错误: 用户取消了上下文压缩", false);
+            sseWriter.sendSseEvent("tool_result",
+                buildToolResultJson(pending.toolCallId, pending.toolName, false, null,
+                    "用户取消了上下文压缩", safeArgs(pending.arguments, pending.toolCallId)));
+        }
+
+        orchestrator.continueAfterConfirmation(sessionId, conversation, sseWriter);
+    }
+
+    private static String buildHandoffContent(String summary) {
+        return "## 上下文压缩交接笔记\n\n" +
+            summary +
+            "\n\n---\n" +
+            "以上是你压缩后的上下文。原始对话已不在当前上下文中，请基于这份笔记继续未完成的任务。";
     }
 
     private void sendJsonError(HttpExchange exchange, int statusCode, String message) throws IOException {

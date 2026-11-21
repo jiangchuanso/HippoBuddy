@@ -1037,12 +1037,17 @@ export const useChatStore = create<ChatState>((set, get) => {
                 ? {
                     ...tc,
                     status: payload.success
-                      ? 'success'
+                      ? /已被用户终止/.test(payload.result ?? '')
+                        ? 'cancelled'
+                        : 'success'
                       : /用户拒绝|denied|rejected/i.test(payload.error ?? '')
                         ? 'denied'
                         : 'failed',
                     result: payload.result,
                     error: payload.error,
+                    background: payload.background,
+                    promoted: payload.promoted,
+                    pid: payload.pid,
                     endedAt: Date.now(),
                   }
                 : tc,
@@ -1073,14 +1078,34 @@ export const useChatStore = create<ChatState>((set, get) => {
         case 'tool_confirmation': {
           const payload = data as ChatSseEventMap['tool_confirmation'];
           updateSession(sid, (s) => {
-            const name = (payload as DeleteFileToolConfirmationPayload).toolType === 'delete_file'
+            const toolType = (payload as { toolType?: string }).toolType;
+            const name = toolType === 'delete_file'
               ? 'delete_file'
-              : 'bash';
+              : toolType === 'compact_context'
+                ? 'compact_context'
+                : 'bash';
             const idx = s.toolCalls.findIndex((tc) => tc.name === name && !tc.confirmationData);
             if (idx === -1) return;
             const next = [...s.toolCalls];
             next[idx] = { ...next[idx], confirmationData: payload };
             s.toolCalls = next;
+          });
+          break;
+        }
+
+        case 'compact_complete': {
+          const payload = data as ChatSseEventMap['compact_complete'];
+          updateSession(sid, (s) => {
+            // 重载后由历史消息内容识别同一标识，避免重复插入
+            if (s.messages.some((m) => m.id === payload.messageId)) return;
+            s.messages = [
+              ...s.messages,
+              {
+                id: payload.messageId,
+                role: 'user',
+                content: `## 上下文压缩交接笔记\n\n${payload.summary}`,
+              },
+            ];
           });
           break;
         }

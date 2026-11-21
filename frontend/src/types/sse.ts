@@ -20,6 +20,7 @@ export type ChatSseEventName =
   | 'tool_progress'
   | 'tool_result'
   | 'tool_confirmation'
+  | 'compact_complete'
   | 'web_search_start'
   | 'web_search_done'
   | 'token_update'
@@ -83,6 +84,12 @@ export interface ToolResultPayload {
   error?: string;
   /** 参数(同 ToolStartPayload.args) */
   args?: unknown;
+  /** bash 后台运行标记(结构化,避免前端解析结果文本) */
+  background?: boolean;
+  /** 是否由前台执行中途转入后台 */
+  promoted?: boolean;
+  /** 后台进程 PID */
+  pid?: number;
 }
 
 /** bash 工具确认请求 */
@@ -103,7 +110,27 @@ export interface DeleteFileToolConfirmationPayload {
   truncated: boolean;
 }
 
-export type ToolConfirmationPayload = BashToolConfirmationPayload | DeleteFileToolConfirmationPayload;
+/** compact_context 工具确认请求 */
+export interface CompactContextToolConfirmationPayload {
+  confirmId: string;
+  toolType: 'compact_context';
+  summary: string;
+  currentTokens: number;
+  summaryTokens: number;
+  savedTokens: number;
+  savedPercent: number;
+}
+
+/** compact_context 确认执行完成，前端插入"上下文已压缩"分隔标识 */
+export interface CompactCompletePayload {
+  messageId: string;
+  summary: string;
+}
+
+export type ToolConfirmationPayload =
+  | BashToolConfirmationPayload
+  | DeleteFileToolConfirmationPayload
+  | CompactContextToolConfirmationPayload;
 
 /** 联网搜索开始(空对象) */
 export type WebSearchStartPayload = Record<string, never>;
@@ -189,6 +216,7 @@ export interface ChatSseEventMap {
   tool_progress: ToolProgressPayload;
   tool_result: ToolResultPayload;
   tool_confirmation: ToolConfirmationPayload;
+  compact_complete: CompactCompletePayload;
   web_search_start: WebSearchStartPayload;
   web_search_done: WebSearchDonePayload;
   token_update: TokenUpdatePayload;

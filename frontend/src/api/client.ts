@@ -8,6 +8,8 @@ import { deleteJson, getJson, postJson, putJson } from './http';
 import { streamSse } from './sse';
 import type { SseEvent } from './sse';
 import type {
+  BackgroundLogResponse,
+  BackgroundStatusResponse,
   ChatRequest,
   DefaultWorkspaceUpdateResult,
   DiffLine,
@@ -23,6 +25,8 @@ import type {
   SessionTokenStats,
   SuggestionsResponse,
   ToolAbortRequest,
+  ToolBackgroundRequest,
+  ToolBackgroundResponse,
   ToolConfirmRequest,
   UpdateLlmConfigRequest,
   WordDiffToken,
@@ -94,19 +98,6 @@ export const sessionApi = {
       { userMessage },
     ),
 
-  /** POST /api/sessions/:id/compact - 手动压缩会话上下文 */
-  compact: (sessionId: string, instruction?: string) =>
-    postJson<{
-      success: boolean;
-      method: string;
-      originalCount: number;
-      compactedCount: number;
-      reducedCount: number;
-      savedTokens: number;
-      savedPercent: number;
-      summary: string;
-    }>(`${API_BASE}/sessions/${encodeURIComponent(sessionId)}/compact`, { instruction }),
-
   /** POST /api/sessions/:id/rewind-check - 回滚前检查(收集目标消息后的文件变更) */
   rewindCheck: (sessionId: string, body: { messageId: string }) =>
     postJson<RewindCheckResponse>(
@@ -131,12 +122,6 @@ export const sessionApi = {
       body,
     ),
 
-  /** POST /api/sessions/:id/summarize-new - 上下文快满时总结并新建会话承接 */
-  summarizeNew: (sessionId: string) =>
-    postJson<{ newSessionId: string; summary: string }>(
-      `${API_BASE}/sessions/${encodeURIComponent(sessionId)}/summarize-new`,
-      {},
-    ),
 };
 
 // ============================================================================
@@ -177,6 +162,22 @@ export const chatApi = {
   /** POST /api/tool/abort - 中止当前会话的 Agent 循环 */
   abortTool: (request: ToolAbortRequest) =>
     postJson<{ success: boolean; message: string }>(`${API_BASE}/tool/abort`, request),
+
+  /** POST /api/tool/background - 把正在前台执行的 bash 进程转入后台托管 */
+  backgroundTool: (request: ToolBackgroundRequest) =>
+    postJson<ToolBackgroundResponse>(`${API_BASE}/tool/background`, request),
+
+  /** GET /api/tool/background - 查询后台进程是否仍在运行 */
+  getBackgroundStatus: (toolCallId: string) =>
+    getJson<BackgroundStatusResponse>(
+      `${API_BASE}/tool/background?toolCallId=${encodeURIComponent(toolCallId)}`,
+    ),
+
+  /** GET /api/tool/background/log - 拉取后台进程日志快照 */
+  getBackgroundLog: (toolCallId: string) =>
+    getJson<BackgroundLogResponse>(
+      `${API_BASE}/tool/background/log?toolCallId=${encodeURIComponent(toolCallId)}`,
+    ),
 
   /** POST /api/suggestions - 基于会话最近历史生成推荐问题(回合结束后异步调用) */
   getSuggestions: (sessionId: string) =>
@@ -725,6 +726,28 @@ export const dataDirApi = {
     postJson<UpdateDataDirResponse>(`${API_BASE}/settings/data-dir`, {
       path,
     } as UpdateDataDirRequest),
+};
+
+// ============================================================================
+// Paste API (对应 FileApiHandler POST /api/files/paste-temp)
+// ============================================================================
+
+/** 临时粘贴文件写入结果 */
+export interface PasteTempResult {
+  /** 绝对路径(消息里以 @path 发送给模型) */
+  path: string;
+  /** 文件名(展示用) */
+  name: string;
+  /** 字符数 */
+  chars: number;
+  /** 行数 */
+  lines: number;
+}
+
+export const pasteApi = {
+  /** POST /api/files/paste-temp - 长文本写入数据目录 tmp/paste,返回绝对路径 */
+  writeTemp: (content: string) =>
+    postJson<PasteTempResult>(`${API_BASE}/files/paste-temp`, { content }),
 };
 
 // ============================================================================
